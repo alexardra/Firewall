@@ -48,6 +48,9 @@ class Firewall:
 
         port_to_match = None
 
+        if pkt.get_protocol() not in ['tcp', 'udp', 'icmp']:
+            return True
+
         if pkt.get_protocol() == 'tcp' or pkt.get_protocol() == 'udp':
             port_to_match = upper_layer.get_src_port(
             ) if pkt_dir == PKT_DIR_INCOMING else upper_layer.get_dest_port()
