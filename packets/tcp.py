@@ -1,16 +1,19 @@
 import traceback
 import struct
+import socket
 from collections import namedtuple
-from packet import Packet
+from packet import PacketTransport
 from http import PacketHTTP
 
 
-class PacketTCP(Packet):
+class PacketTCP(PacketTransport):
     seq = -1
 
     AddressPair = namedtuple('AddressPair', ['ip', 'port'])
 
     def __init__(self, pkt, src_ip, dest_ip):
+        PacketTransport.__init__(self, 'tcp')
+
         self._packet = pkt
         self._src_ip = src_ip
         self._dest_ip = dest_ip
@@ -31,11 +34,11 @@ class PacketTCP(Packet):
         return self._dest_port
 
     def is_http_to_log(self, outgoing):
-        if not self._packet[self._header_length:]: # if no tcp payload 
+        if not self._packet[self._header_length:]:  # if no tcp payload
             return False
 
-        if (outgoing and self._dest_port != 80) or (not outgoing and self._src_port != 80): # if not http
-            return False    
+        if (outgoing and self._dest_port != 80) or (not outgoing and self._src_port != 80):  # if not http
+            return False
 
         self._upper_layer_packet = PacketHTTP(
             self._packet[self._header_length:], self._src_pair, self._dest_pair, outgoing, self._seq)
@@ -52,15 +55,17 @@ class PacketTCP(Packet):
             return msg
 
     def get_reset_packet(self):
+        header = self.__construct_header()
+        pseudo_header = self.get_pseudo_header(self._dest_ip, self._src_ip, len(header))
+
+        checksum = self.get_checksum(pseudo_header + header)
+        checksum_header_index = 16
+
+        return header[:checksum_header_index] + struct.pack('!H', checksum) + header[checksum_header_index + 2:]
+
+    def __construct_header(self):
         PacketTCP.seq = (PacketTCP.seq + 1) % 4294967296
-        seq = struct.unpack('!2H', struct.pack('!I', PacketTCP.seq))
-        ack = struct.unpack('!2H', struct.pack('!I', self._seq))
-
         hl_reset = struct.unpack('!H', bytearray([80, 4]))[0]
+        window = socket.htons(5840)
 
-        header_fields = [self._dest_port, self._src_port,
-                         seq[0], seq[1], ack[0], ack[1], hl_reset, 65536, 0, 0]
-        header_fields[7] = self.get_checksum(header_fields)
-        header = struct.pack('!10H', *header_fields)
-
-        return header
+        return struct.pack('!2H2L4H', self._dest_port, self._src_port, PacketTCP.seq, 0, hl_reset, window, 0, 0)

@@ -14,6 +14,11 @@ from rules.ip import IP
 from rules.port import Port
 from rules.domainname import Domainname
 
+class PacketPermission:
+    ALLOW = 1
+    DENY = 2
+    DROP = 3
+
 class Firewall:
     def __init__(self, config, iface_int, iface_ext):
         self.iface_int = iface_int
@@ -29,40 +34,44 @@ class Firewall:
         self._rules = self.__get_loaded_rules(config['rule'])
 
         self._log_file = open('http.log', 'a+')
-        print self._log_file
 
     # @pkt_dir: either PKT_DIR_INCOMING or PKT_DIR_OUTGOING
     # @pkt: the actual data of the IPv4 packet (including IP header)
     def handle_packet(self, pkt_dir, pkt):
-        # self.__log_packet(pkt_dir, pkt)
+        self.__log_packet(pkt_dir, pkt)
 
         unpacked_packet = PacketIP(pkt)
 
         if not unpacked_packet.is_valid():
             return
 
-        allow_packet, drop_packet = self.__allow_packet(
-            unpacked_packet, pkt_dir)
+        permission = self.__allow_packet(unpacked_packet, pkt_dir)
 
-        if allow_packet:
+        if permission == PacketPermission.ALLOW:
             self.__send_packet(pkt, pkt_dir)
-        # elif drop_packet and unpacked_packet.get_protocol() == 'tcp':
-        #     self.__send_packet(unpacked_packet.get_reset_packet(), not pkt_dir)
-        # elif drop_packet and unpacked_packet.get_protocol() == 'udp':
-        #     self.__send_packet(unpacked_packet.get_reset_packet(), PKT_DIR_INCOMING)
+        elif permission == PacketPermission.DENY:
+            reset_pkt = unpacked_packet.get_reset_packet()
+            if not reset_pkt:
+                return 
 
-        self.__log_http_packets(unpacked_packet, pkt_dir)            
+            sending_interface = not pkt_dir
+            if unpacked_packet.get_protocol() == 'udp':
+                sending_interface = PKT_DIR_INCOMING
+
+            self.__send_packet(reset_pkt, sending_interface)
+                    
 
     def __send_packet(self, pkt, pkt_dir):
         if pkt_dir == PKT_DIR_INCOMING:
-            # print pkt
             self.iface_int.send_ip_packet(pkt)
         elif pkt_dir == PKT_DIR_OUTGOING:
             self.iface_ext.send_ip_packet(pkt)
 
     def __allow_packet(self, pkt, pkt_dir):
-        ip_to_match = pkt.get_src_ip(
-        ) if pkt_dir == PKT_DIR_INCOMING else pkt.get_dest_ip()
+        if pkt.get_protocol() not in ['tcp', 'udp', 'icmp']:
+            return PacketPermission.ALLOW
+            
+        ip_to_match = pkt.get_src_ip() if pkt_dir == PKT_DIR_INCOMING else pkt.get_dest_ip()
 
         upper_layer = pkt.get_upper_layer_packet()
 
@@ -71,33 +80,36 @@ class Firewall:
 
         port_to_match = None
 
-        if pkt.get_protocol() not in ['tcp', 'udp', 'icmp']:
-            return True, False
-
         if pkt.get_protocol() == 'tcp' or pkt.get_protocol() == 'udp':
             port_to_match = upper_layer.get_src_port(
             ) if pkt_dir == PKT_DIR_INCOMING else upper_layer.get_dest_port()
         elif pkt.get_protocol() == 'icmp':
             port_to_match = upper_layer.get_type()
 
-        return self.__get_verdict(pkt.get_protocol(
-        ), ip_to_match, port_to_match) if port_to_match else True
+        verdict = self.__get_verdict(pkt.get_protocol(), ip_to_match, port_to_match)
+        return verdict if port_to_match else PacketPermission.ALLOW
 
     def __get_verdict(self, protocol, ip, port):
-        allow_packet = True
-        drop_packet = False
-        log_http = False
+        allow = True
+        deny = False
 
         for rule in self._rules:
             if type(rule) == self.ProtocolRule and rule.protocol == protocol:
                 if rule.ip.ip_in_network(ip) and rule.port.is_match(port):
-                    allow_packet = rule.verdict == 'pass'
-                    drop_packet = rule.verdict == 'deny'
-        return allow_packet, drop_packet
+                    allow = rule.verdict == 'pass'
+                    deny = rule.verdict == 'deny'
+
+        if deny:
+            return PacketPermission.DENY
+        
+        if allow:
+            return PacketPermission.ALLOW
+        
+        return PacketPermission.DROP
 
     def __get_dns_verdict(self, packet, ip, pkt_dir):
-        allow_packet = True
-        drop_packet = False
+        allow = True
+        deny = False
 
         port_to_match = packet.get_src_port(
         ) if pkt_dir == PKT_DIR_INCOMING else packet.get_dest_port()
@@ -105,14 +117,20 @@ class Firewall:
         for rule in self._rules:
             if type(rule) == self.DNSRule:
                 if rule.domainname.is_match(packet.get_dns_domain_name()):
-                    allow_packet = rule.verdict == 'pass'
-                    drop_packet = rule.verdict == 'deny'
+                    allow = rule.verdict == 'pass'
+                    deny = rule.verdict == 'deny'
             elif type(rule) == self.ProtocolRule and rule.protocol == 'udp':
                 if rule.ip.ip_in_network(ip) and rule.port.is_match(port_to_match):
-                    allow_packet = rule.verdict == 'pass'
-                    drop_packet = rule.verdict == 'deny'
-
-        return allow_packet, drop_packet
+                    allow = rule.verdict == 'pass'
+                    deny = rule.verdict == 'deny'
+ 
+        if deny:
+            return PacketPermission.DENY
+        
+        if allow:
+            return PacketPermission.ALLOW
+        
+        return PacketPermission.DROP
 
     def __log_http_packets(self, ip_packet, pkt_dir):
         log = False
@@ -156,12 +174,7 @@ class Firewall:
             codes = f.read().splitlines()
 
         IPRange = namedtuple('IPRange', ['start_ip', 'end_ip'])
-        country_code_map = {}
-        for line in codes:
-            line = line.split()
-            country_code_map[line[2].lower()] = IPRange(line[0], line[1])
-
-        return country_code_map
+        return dict([(line[2].lower(), IPRange(line[0], line[1])) for line in map(lambda x: x.split(), codes)])
 
     def __log_packet(self, pkt_dir, pkt):
         src_ip = pkt[12:16]
