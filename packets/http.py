@@ -137,11 +137,15 @@ class PacketHTTP(Packet):
 
     def get_log_msg(self):
         try:
-            print self._request, self._response
             request = [self._request.host, self._request.method,
                        self._request.path, self._request.version]
             response = [self._response.statuscode, self._response.size]
-            print request, response
             return ' '.join(request + response)
+        except:
+            print(traceback.format_exc())
+
+    def get_hostname(self):
+        try:
+            return self._request.host
         except:
             print(traceback.format_exc())

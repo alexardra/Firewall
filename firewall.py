@@ -31,8 +31,7 @@ class Firewall:
         self.DNSRule = namedtuple('DNSRule', ['verdict', 'domainname'])
         self.LogRule = namedtuple('LogRule', ['hostname'])
 
-        self._rules = self.__get_loaded_rules(config['rule'])
-
+        self._dns_rules, self._http_rules, self._transport_rules = self.__get_loaded_rules(config['rule'])
         self._log_file = open('http.log', 'a+')
 
     # @pkt_dir: either PKT_DIR_INCOMING or PKT_DIR_OUTGOING
@@ -41,25 +40,21 @@ class Firewall:
         self.__log_packet(pkt_dir, pkt)
 
         unpacked_packet = PacketIP(pkt)
-
         if not unpacked_packet.is_valid():
             return
 
         permission = self.__allow_packet(unpacked_packet, pkt_dir)
 
         if permission == PacketPermission.ALLOW:
+            self.__log_http_packets(unpacked_packet, pkt_dir)
             self.__send_packet(pkt, pkt_dir)
         elif permission == PacketPermission.DENY:
             reset_pkt = unpacked_packet.get_reset_packet()
             if not reset_pkt:
                 return 
 
-            sending_interface = not pkt_dir
-            if unpacked_packet.get_protocol() == 'udp':
-                sending_interface = PKT_DIR_INCOMING
-
+            sending_interface = PKT_DIR_INCOMING if unpacked_packet.get_protocol() == 'udp' else not pkt_dir
             self.__send_packet(reset_pkt, sending_interface)
-                    
 
     def __send_packet(self, pkt, pkt_dir):
         if pkt_dir == PKT_DIR_INCOMING:
@@ -67,107 +62,85 @@ class Firewall:
         elif pkt_dir == PKT_DIR_OUTGOING:
             self.iface_ext.send_ip_packet(pkt)
 
-    def __allow_packet(self, pkt, pkt_dir):
-        if pkt.get_protocol() not in ['tcp', 'udp', 'icmp']:
-            return PacketPermission.ALLOW
-            
-        ip_to_match = pkt.get_src_ip() if pkt_dir == PKT_DIR_INCOMING else pkt.get_dest_ip()
+    def __get_match_ip_and_port(self, pkt, pkt_dir):
+        ip = pkt.get_src_ip() if pkt_dir == PKT_DIR_INCOMING else pkt.get_dest_ip()
 
         upper_layer = pkt.get_upper_layer_packet()
 
-        if pkt.get_protocol() == 'udp' and upper_layer.is_valid_dns():
-            return self.__get_dns_verdict(upper_layer, ip_to_match, pkt_dir)
+        if pkt.get_protocol() == 'icmp':
+            port = upper_layer.get_type()
+        else:
+            port = upper_layer.get_src_port() if pkt_dir == PKT_DIR_INCOMING else upper_layer.get_dest_port()
 
-        port_to_match = None
+        return ip, port
 
-        if pkt.get_protocol() == 'tcp' or pkt.get_protocol() == 'udp':
-            port_to_match = upper_layer.get_src_port(
-            ) if pkt_dir == PKT_DIR_INCOMING else upper_layer.get_dest_port()
-        elif pkt.get_protocol() == 'icmp':
-            port_to_match = upper_layer.get_type()
+    def __allow_packet(self, pkt, pkt_dir):
+        if pkt.get_protocol() not in ['tcp', 'udp', 'icmp']:
+            return PacketPermission.ALLOW
 
-        verdict = self.__get_verdict(pkt.get_protocol(), ip_to_match, port_to_match)
-        return verdict if port_to_match else PacketPermission.ALLOW
+        ip_to_match, port_to_match = self.__get_match_ip_and_port(pkt, pkt_dir)
+        
+        return self.__get_verdict(pkt, ip_to_match, port_to_match)
 
-    def __get_verdict(self, protocol, ip, port):
-        allow = True
-        deny = False
+    def __get_verdict(self, ip_pkt, ip, port):
+        upper_layer_pkt = ip_pkt.get_upper_layer_packet()
 
-        for rule in self._rules:
-            if type(rule) == self.ProtocolRule and rule.protocol == protocol:
-                if rule.ip.ip_in_network(ip) and rule.port.is_match(port):
-                    allow = rule.verdict == 'pass'
-                    deny = rule.verdict == 'deny'
+        if ip_pkt.get_protocol() == 'udp' and upper_layer_pkt.is_valid_dns():
+            for rule in self._dns_rules:
+                if rule.domainname.is_match(upper_layer_pkt.get_dns_domain_name()):
+                    return self.__get_packet_permision(rule.verdict)
 
-        if deny:
+        for rule in self._transport_rules:
+            if ip_pkt.get_protocol() == rule.protocol and rule.ip.ip_in_network(ip) and rule.port.is_match(port):
+                return self.__get_packet_permision(rule.verdict)
+        
+        return PacketPermission.ALLOW
+        
+    def __get_packet_permision(self, verdict):
+        if verdict == 'deny':
             return PacketPermission.DENY
         
-        if allow:
-            return PacketPermission.ALLOW
+        if verdict == 'drop':
+            return PacketPermission.DROP
         
-        return PacketPermission.DROP
-
-    def __get_dns_verdict(self, packet, ip, pkt_dir):
-        allow = True
-        deny = False
-
-        port_to_match = packet.get_src_port(
-        ) if pkt_dir == PKT_DIR_INCOMING else packet.get_dest_port()
-
-        for rule in self._rules:
-            if type(rule) == self.DNSRule:
-                if rule.domainname.is_match(packet.get_dns_domain_name()):
-                    allow = rule.verdict == 'pass'
-                    deny = rule.verdict == 'deny'
-            elif type(rule) == self.ProtocolRule and rule.protocol == 'udp':
-                if rule.ip.ip_in_network(ip) and rule.port.is_match(port_to_match):
-                    allow = rule.verdict == 'pass'
-                    deny = rule.verdict == 'deny'
- 
-        if deny:
-            return PacketPermission.DENY
-        
-        if allow:
-            return PacketPermission.ALLOW
-        
-        return PacketPermission.DROP
+        return PacketPermission.ALLOW
 
     def __log_http_packets(self, ip_packet, pkt_dir):
-        log = False
-    
         if ip_packet.get_protocol() == 'tcp':
-
-            for rule in self._rules:
-                if type(rule) == self.LogRule:
-                    pass
-                    # log on hostname condition here
-
             upper_layer = ip_packet.get_upper_layer_packet()
             if upper_layer.is_http_to_log(pkt_dir == PKT_DIR_OUTGOING):
-                self._log_file.write(upper_layer.get_http_log_msg() + '\n')
-                self._log_file.flush()
+                for rule in self._http_rules:
+                    if rule.hostname.is_match(upper_layer.get_http_hostname()):
+                        log_msg = upper_layer.get_http_log_msg()
+                        if log_msg:
+                            self._log_file.write(upper_layer.get_http_log_msg() + '\n')
+                            self._log_file.flush()
+                        return                        
 
     def __get_loaded_rules(self, file_name):
         with open(file_name, 'r') as f:
             rules = f.read().splitlines()
 
-        parsed_rules = []
+        dns, http, transport = ([] for _ in xrange(3))
+
         for rule in rules:
             if len(rule) > 0 and not rule.startswith(('\n', '%')):
                 rule_fields = map(lambda x: x.lower(), rule.split()[:4])
 
-                if rule_fields[1] == 'dns':
-                    parsed_rules.append(self.DNSRule(
-                        verdict=rule_fields[0], domainname=Domainname(rule_fields[2])))
-                elif rule_fields[0] == 'log':
-                    parsed_rules.append(self.LogRule(
-                        hostname=Domainname(rule_fields[2])))
-                else:
-                    verdict, protocol, ip, port = rule_fields
-                    parsed_rules.append(self.ProtocolRule(
-                        verdict=verdict, protocol=protocol, ip=IP(ip, self.country_code_map), port=Port(port)))
+                try:
+                    if rule_fields[1] == 'dns':
+                        dns.append(self.DNSRule(verdict=rule_fields[0], domainname=Domainname(rule_fields[2])))
+                    elif rule_fields[0] == 'log':
+                        http.append(self.LogRule(hostname=Domainname(rule_fields[2])))
+                    else:
+                        verdict, protocol, ip, port = rule_fields
+                        ip = IP(ip, self.country_code_map)
+                        port = Port(port)
+                        transport.append(self.ProtocolRule(verdict=verdict, protocol=protocol, ip=ip, port=port))
+                except:
+                    pass
 
-        return parsed_rules
+        return dns, http, transport
 
     def __get_loaded_country_codes(self, file_name):
         with open(file_name, 'r') as f:
@@ -188,5 +161,3 @@ class Firewall:
 
         print '%s len=%4dB, IPID=%5d  %15s -> %15s' % (dir_str, len(pkt), ipid,
                                                        socket.inet_ntoa(src_ip), socket.inet_ntoa(dst_ip))
-
-# Firewall({ 'rule': 'rules.conf' }, 0, 1)

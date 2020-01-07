@@ -46,13 +46,16 @@ class PacketTCP(PacketTransport):
         return self._upper_layer_packet.is_assembled()
 
     def get_http_log_msg(self):
-        msg = ''
         try:
-            msg = self._upper_layer_packet.get_log_msg()
+            return self._upper_layer_packet.get_log_msg()
         except:
             print(traceback.format_exc())
-        finally:
-            return msg
+
+    def get_http_hostname(self):
+        try:
+            return self._upper_layer_packet.get_hostname()
+        except:
+            print(traceback.format_exc())
 
     def get_reset_packet(self):
         header = self.__construct_header()
