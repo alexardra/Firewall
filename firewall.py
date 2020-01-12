@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import struct
 import socket
 
@@ -146,8 +146,12 @@ class Firewall:
         with open(file_name, 'r') as f:
             codes = f.read().splitlines()
 
-        IPRange = namedtuple('IPRange', ['start_ip', 'end_ip'])
-        return dict([(line[2].lower(), IPRange(line[0], line[1])) for line in map(lambda x: x.split(), codes)])
+        IPRange = namedtuple('IPRange', ['start', 'end'])
+
+        country_map = defaultdict(list)
+        for line in map(lambda x: x.split(), codes):
+            country_map[line[2].lower()].append(IPRange(line[0], line[1]))
+        return country_map        
 
     def __log_packet(self, pkt_dir, pkt):
         src_ip = pkt[12:16]

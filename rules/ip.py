@@ -11,6 +11,7 @@ class IP(object):
 
         if type(self._network) == str and len(self._network.split('/')) == 1:
             self._network += '/32'
+        # print self._network
 
     def ip_in_network(self, ip):
         if type(self._network) == str: # next 5 lines from stack overflow 
@@ -20,8 +21,8 @@ class IP(object):
             mask = (0xffffffff << (32 - int(bits))) & 0xffffffff
             return (ipaddr & mask) == (netaddr & mask)
          # IPRange
-        start_ip, end_ip = self._network.start_ip, self._network.end_ip
-        return self.__ip_to_tuple(start_ip) < self.__ip_to_tuple(ip) < self.__ip_to_tuple(end_ip)
+
+        return any([self.__ip_to_tuple(n.start) <= self.__ip_to_tuple(ip) <= self.__ip_to_tuple(n.end) for n in self._network])
 
     def __ip_to_tuple(self, ip):
         return tuple(int(n) for n in ip.split('.'))
