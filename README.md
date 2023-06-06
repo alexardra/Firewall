@@ -1,6 +1,6 @@
 # Firewall
 
-Firewall implementation for Computer Networking course in Free University Tbilisi.
+Firewall implementation for Computer Networking course
 
 Firewall has two parts:
 1. stateless firewall
